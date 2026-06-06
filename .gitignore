@@ -30,6 +30,16 @@ modes/_profile.md
 .update-dismissed
 .update-lock
 
+# More personal data (never committed)
+article-digest.md
+data/follow-ups.md
+data/*.bak
+interview-prep/*
+!interview-prep/.gitkeep
+
+# Local scratch
+MIGRATION-HANDOFF.md
+
 # Secrets (never commit — use .env.example as template)
 .env
 
@@ -47,4 +57,5 @@ bun.lock
 .claude/settings.local.json
 .claude/memory/
 career-dashboard
+career-dashboard.exe
 package-lock.json
