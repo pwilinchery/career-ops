@@ -37,9 +37,6 @@ data/*.bak
 interview-prep/*
 !interview-prep/.gitkeep
 
-# Local scratch
-MIGRATION-HANDOFF.md
-
 # Secrets (never commit — use .env.example as template)
 .env
 
