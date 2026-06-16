@@ -33,6 +33,7 @@ modes/_profile.md
 # More personal data (never committed)
 article-digest.md
 data/follow-ups.md
+data/network.md
 data/*.bak
 interview-prep/*
 !interview-prep/.gitkeep
