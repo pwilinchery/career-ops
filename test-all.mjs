@@ -1137,6 +1137,51 @@ try {
   fail(`job-identity unit tests crashed: ${e.message}`);
 }
 
+// ── 13b. SENIORITY-LEVEL VETO (false title merges) ──────────────
+
+console.log('\n13b. Seniority-level veto');
+
+try {
+  const { levelVerdict, wordRank, numLevels } = await import(pathToFileURL(join(ROOT, 'role-level.mjs')).href);
+
+  const cases = [
+    // [a, b, expected, why]
+    ['Senior Software Engineer', 'Staff Software Engineer', 'distinct', 'Senior vs Staff'],
+    ['SDE II', 'SDE III', 'distinct', 'roman II vs III'],
+    ['SDE2', 'SDE3', 'distinct', 'glued SDE2 vs SDE3'],
+    ['SDE2', 'SDE II', 'unknown', 'glued "2" and roman "II" are the SAME level → mergeable'],
+    ['SDE 2', 'SDE III', 'distinct', 'spaced arabic 2 vs roman III'],
+    ['SDE II', 'SDE 3', 'distinct', 'roman II vs spaced arabic 3'],
+    ['Software Engineer L4', 'Software Engineer L5', 'distinct', 'L4 vs L5 code'],
+    ['Software Engineer', 'Senior Software Engineer', 'distinct', 'bare vs Senior (BARE_IS_A_LEVEL)'],
+    ['Senior Backend Engineer', 'Senior Backend Engineer', 'unknown', 'same level → fall through to title match'],
+    ['Backend Engineer', 'Backend Developer', 'unknown', 'no level signal either side'],
+    ['SDE II', 'SDE II', 'unknown', 'same roman level'],
+    ['VP of Engineering', 'Director of Engineering', 'unknown', 'management — untouched, no veto'],
+    ['Senior Engineering Manager', 'Engineering Manager', 'unknown', 'management ladder left alone'],
+  ];
+  let ok = true;
+  for (const [a, b, want, why] of cases) {
+    const got = levelVerdict(a, b);
+    if (got !== want) { ok = false; fail(`levelVerdict("${a}","${b}") = ${got}, want ${want} (${why})`); }
+  }
+  if (ok) pass(`levelVerdict: all ${cases.length} level cases correct`);
+
+  // Spot-check the extractors directly
+  if (wordRank('Staff SWE') === 5 && wordRank('Senior SWE') === 4 && wordRank('VP Eng') === null) {
+    pass('wordRank maps IC ladder, nulls management');
+  } else {
+    fail(`wordRank wrong: staff=${wordRank('Staff SWE')} senior=${wordRank('Senior SWE')} vp=${wordRank('VP Eng')}`);
+  }
+  if (numLevels('SDE III').has(3) && numLevels('Engineer L5').has(5) && numLevels('Backend Engineer').size === 0) {
+    pass('numLevels extracts roman, L-codes, and nothing from bare titles');
+  } else {
+    fail('numLevels extraction wrong');
+  }
+} catch (e) {
+  fail(`level-veto unit tests crashed: ${e.message}`);
+}
+
 // End-to-end: merge must NOT collapse two distinct same-company reqs whose
 // titles fuzzy-match but whose gh_jids differ (regression for #291/#292).
 const veToDir = mkdtempSync(join(tmpdir(), 'career-ops-veto-'));
@@ -1171,6 +1216,7 @@ try {
   writeFileSync(scriptCopy, readFileSync(join(ROOT, 'merge-tracker.mjs'), 'utf-8'));
   writeFileSync(join(veToDir, 'tracker-links.mjs'), readFileSync(join(ROOT, 'tracker-links.mjs'), 'utf-8'));
   writeFileSync(join(veToDir, 'job-identity.mjs'), readFileSync(join(ROOT, 'job-identity.mjs'), 'utf-8'));
+  writeFileSync(join(veToDir, 'role-level.mjs'), readFileSync(join(ROOT, 'role-level.mjs'), 'utf-8'));
   writeFileSync(join(veToDir, 'states.yml'), existsSync(join(ROOT, 'templates/states.yml'))
     ? readFileSync(join(ROOT, 'templates/states.yml'), 'utf-8') : '');
 

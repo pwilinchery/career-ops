@@ -20,6 +20,7 @@ import { fileURLToPath } from 'url';
 import { execFileSync } from 'child_process';
 import { normalizeReportLink as normalizeLink } from './tracker-links.mjs';
 import { dupeVerdict, urlFromReport } from './job-identity.mjs';
+import { levelVerdict } from './role-level.mjs';
 
 const CAREER_OPS = dirname(fileURLToPath(import.meta.url));
 // Support both layouts: data/applications.md (boilerplate) and applications.md (original).
@@ -382,7 +383,13 @@ for (const file of tsvFiles) {
     duplicate = existingApps.find(app => {
       if (normalizeCompany(app.company) !== normCompany) return false;
       if (!roleFuzzyMatch(addition.role, app.role)) return false;
-      return dupeVerdict(additionUrl, urlFromReport(app.report, TRACKER_DIR)) !== 'distinct';
+      const idVerdict = dupeVerdict(additionUrl, urlFromReport(app.report, TRACKER_DIR));
+      if (idVerdict === 'distinct') return false;
+      // Seniority-level veto: titles that fuzzy-match but carry conflicting
+      // levels (SDE II vs SDE III, Senior vs Staff) are distinct openings —
+      // unless a confirmed same-id cross-listing says otherwise.
+      if (idVerdict !== 'same' && levelVerdict(addition.role, app.role) === 'distinct') return false;
+      return true;
     });
   }
 

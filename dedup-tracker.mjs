@@ -13,6 +13,7 @@ import { readFileSync, writeFileSync, copyFileSync, existsSync, mkdirSync } from
 import { join, dirname } from 'path';
 import { fileURLToPath } from 'url';
 import { dupeVerdict, urlFromReport } from './job-identity.mjs';
+import { levelVerdict } from './role-level.mjs';
 
 const CAREER_OPS = dirname(fileURLToPath(import.meta.url));
 // Support both layouts: data/applications.md (boilerplate) and applications.md (original)
@@ -81,6 +82,18 @@ const LOCATION_STOPWORDS = new Set([
   'remote', 'global', 'emea', 'apac', 'latam',
 ]);
 
+// Generic role-level descriptors. Two roles whose ONLY overlap is in this set
+// (e.g. [software, engineer]) are NOT the same role — they're just labelled at
+// the same altitude. Mirrors merge-tracker.mjs so both paths agree: "Software
+// Engineer, Payments" and "Software Engineer, Search" must not merge on the
+// shared [software, engineer] alone (see #633).
+const BASELINE_TOKENS = new Set([
+  'software', 'engineer', 'engineering', 'developer', 'manager', 'architect',
+  'analyst', 'designer', 'consultant', 'specialist',
+  'platform', 'systems', 'services',
+  'backend', 'frontend', 'fullstack',
+]);
+
 function roleMatch(a, b) {
   const filterStopwords = (words) =>
     words.filter(w => !ROLE_STOPWORDS.has(w) && !LOCATION_STOPWORDS.has(w));
@@ -94,7 +107,12 @@ function roleMatch(a, b) {
   const smaller = Math.min(wordsA.length, wordsB.length);
   const ratio = overlap.length / smaller;
 
-  return overlap.length >= 2 && ratio >= 0.6;
+  if (overlap.length < 2 || ratio < 0.6) return false;
+
+  // Require at least one discriminating (non-baseline) token in the overlap.
+  // Roles sharing only generic descriptors are at the same altitude, not the
+  // same role — different teams must not collapse onto each other.
+  return overlap.some(w => !BASELINE_TOKENS.has(w));
 }
 
 function parseScore(s) {
@@ -178,6 +196,12 @@ for (const [company, companyEntries] of groups) {
         urlFromReport(companyEntries[j].report, TRACKER_DIR),
       );
       if (verdict === 'distinct') continue;
+      // Seniority-level veto: titles that fuzzy-match but carry conflicting
+      // levels (SDE II vs SDE III, Senior vs Staff) are distinct openings. A
+      // confirmed same-id cross-listing overrides this (titles may just differ
+      // by a typo); otherwise a level conflict blocks the merge.
+      if (verdict !== 'same' &&
+          levelVerdict(companyEntries[i].role, companyEntries[j].role) === 'distinct') continue;
       cluster.push(companyEntries[j]);
       processed.add(j);
     }
