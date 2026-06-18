@@ -12,12 +12,14 @@
 import { readFileSync, writeFileSync, copyFileSync, existsSync, mkdirSync } from 'fs';
 import { join, dirname } from 'path';
 import { fileURLToPath } from 'url';
+import { dupeVerdict, urlFromReport } from './job-identity.mjs';
 
 const CAREER_OPS = dirname(fileURLToPath(import.meta.url));
 // Support both layouts: data/applications.md (boilerplate) and applications.md (original)
 const APPS_FILE = existsSync(join(CAREER_OPS, 'data/applications.md'))
   ? join(CAREER_OPS, 'data/applications.md')
   : join(CAREER_OPS, 'applications.md');
+const TRACKER_DIR = dirname(APPS_FILE);
 const DRY_RUN = process.argv.includes('--dry-run');
 
 // Ensure required directories exist (fresh setup)
@@ -166,10 +168,18 @@ for (const [company, companyEntries] of groups) {
 
     for (let j = i + 1; j < companyEntries.length; j++) {
       if (processed.has(j)) continue;
-      if (roleMatch(companyEntries[i].role, companyEntries[j].role)) {
-        cluster.push(companyEntries[j]);
-        processed.add(j);
-      }
+      if (!roleMatch(companyEntries[i].role, companyEntries[j].role)) continue;
+      // Job-ID veto: don't cluster two entries that resolve to different ATS
+      // requisition IDs from the same provider — they are distinct openings
+      // even when their titles fuzzy-match. Incomparable IDs fall back to the
+      // title match alone.
+      const verdict = dupeVerdict(
+        urlFromReport(companyEntries[i].report, TRACKER_DIR),
+        urlFromReport(companyEntries[j].report, TRACKER_DIR),
+      );
+      if (verdict === 'distinct') continue;
+      cluster.push(companyEntries[j]);
+      processed.add(j);
     }
 
     if (cluster.length < 2) continue;

@@ -19,6 +19,7 @@ import { join, basename, dirname } from 'path';
 import { fileURLToPath } from 'url';
 import { execFileSync } from 'child_process';
 import { normalizeReportLink as normalizeLink } from './tracker-links.mjs';
+import { dupeVerdict, urlFromReport } from './job-identity.mjs';
 
 const CAREER_OPS = dirname(fileURLToPath(import.meta.url));
 // Support both layouts: data/applications.md (boilerplate) and applications.md (original).
@@ -336,6 +337,9 @@ let added = 0;
 let updated = 0;
 let skipped = 0;
 const newLines = [];
+// Existing rows updated/decided in this run — guards against two distinct
+// additions silently overwriting the same row (the #292 data-loss bug).
+const claimed = new Set();
 
 for (const file of tsvFiles) {
   const content = readFileSync(join(ADDITIONS_DIR, file), 'utf-8').trim();
@@ -367,11 +371,18 @@ for (const file of tsvFiles) {
   }
 
   if (!duplicate) {
-    // Company + role fuzzy match
+    // Company + role fuzzy match, gated by a job-ID veto: two postings that
+    // resolve to comparable ATS IDs from the same provider are only the same
+    // opening when the IDs match. Different IDs = distinct openings, never merge
+    // (e.g. two Greenhouse FDE reqs that share a title family). When IDs are
+    // incomparable (different providers, LinkedIn, manual add) we fall back to
+    // the fuzzy title match alone. See #291/#292.
     const normCompany = normalizeCompany(addition.company);
+    const additionUrl = urlFromReport(addition.report, TRACKER_DIR);
     duplicate = existingApps.find(app => {
       if (normalizeCompany(app.company) !== normCompany) return false;
-      return roleFuzzyMatch(addition.role, app.role);
+      if (!roleFuzzyMatch(addition.role, app.role)) return false;
+      return dupeVerdict(additionUrl, urlFromReport(app.report, TRACKER_DIR)) !== 'distinct';
     });
   }
 
@@ -379,16 +390,33 @@ for (const file of tsvFiles) {
     const newScore = parseScore(addition.score);
     const oldScore = parseScore(duplicate.score);
 
-    if (newScore > oldScore) {
+    if (claimed.has(duplicate.num)) {
+      // A different addition already updated this exact row in this run. Two
+      // distinct additions cannot both be the same single existing entry —
+      // collapsing them would silently overwrite the first (the #292 bug).
+      // Keep this one as its own entry instead of losing it.
+      const entryNum = addition.num > maxNum ? addition.num : ++maxNum;
+      if (addition.num > maxNum) maxNum = addition.num;
+      const newLine = `| ${entryNum} | ${addition.date} | ${addition.company} | ${addition.role} | ${addition.score} | ${addition.status} | ${addition.pdf} | ${addition.report} | ${addition.notes} |`;
+      newLines.push(newLine);
+      added++;
+      console.log(`➕ Add #${entryNum}: ${addition.company} — ${addition.role} (${addition.score}) [row #${duplicate.num} already claimed this run — kept separate]`);
+    } else if (newScore > oldScore) {
       console.log(`🔄 Update: #${duplicate.num} ${addition.company} — ${addition.role} (${oldScore}→${newScore})`);
       const lineIdx = appLines.indexOf(duplicate.raw);
       if (lineIdx >= 0) {
         const updatedLine = `| ${duplicate.num} | ${addition.date} | ${addition.company} | ${addition.role} | ${addition.score} | ${duplicate.status} | ${duplicate.pdf} | ${addition.report} | Re-eval ${addition.date} (${oldScore}→${newScore}). ${addition.notes} |`;
         appLines[lineIdx] = updatedLine;
+        // Reflect the change so later additions in this run compare against the
+        // updated row, and mark it claimed so it can't be overwritten again.
+        duplicate.raw = updatedLine;
+        duplicate.score = addition.score;
+        claimed.add(duplicate.num);
         updated++;
       }
     } else {
       console.log(`⏭️  Skip: ${addition.company} — ${addition.role} (existing #${duplicate.num} ${oldScore} >= new ${newScore})`);
+      claimed.add(duplicate.num);
       skipped++;
     }
   } else {
