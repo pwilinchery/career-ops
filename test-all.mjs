@@ -1086,6 +1086,198 @@ try {
   fail(`tracker-link normalization tests crashed: ${e.message}`);
 }
 
+// ── 13. JOB IDENTITY & DEDUP VETO (#291/#292) ───────────────────
+
+console.log('\n13. Job identity & dedup veto');
+
+try {
+  const { jobIdentity, dupeVerdict } = await import(pathToFileURL(join(ROOT, 'job-identity.mjs')).href);
+
+  // gh_jid resolves the same on the ATS board and the company career page
+  const ghBoard = jobIdentity('https://job-boards.greenhouse.io/acme/jobs/123');
+  const ghSite = jobIdentity('https://acme.com/careers/job/?gh_jid=123');
+  if (ghBoard?.provider === 'greenhouse' && ghBoard.id === '123' &&
+      ghSite?.provider === 'greenhouse' && ghSite.id === '123') {
+    pass('greenhouse id resolves identically from board path and gh_jid query');
+  } else {
+    fail(`greenhouse id mismatch: ${JSON.stringify(ghBoard)} vs ${JSON.stringify(ghSite)}`);
+  }
+
+  // Cross-listing of the SAME posting → 'same'
+  if (dupeVerdict('https://job-boards.greenhouse.io/acme/jobs/123',
+                  'https://acme.com/careers/job/?gh_jid=123') === 'same') {
+    pass('same posting cross-listed (board + company site) → same');
+  } else {
+    fail('cross-listed same posting not detected as same');
+  }
+
+  // The real bug: two distinct Greenhouse reqs that share a title family
+  if (dupeVerdict('https://databricks.com/company/careers/open-positions/job?gh_jid=8551531002',
+                  'https://databricks.com/company/careers/open-positions/job?gh_jid=8367942002') === 'distinct') {
+    pass('two different gh_jid reqs → distinct (the #291/#292 case)');
+  } else {
+    fail('different gh_jid reqs not detected as distinct');
+  }
+
+  // Incomparable: LinkedIn / manual add has no ATS id → unknown (caller falls back)
+  if (dupeVerdict('https://www.linkedin.com/jobs/view/4021', 'https://acme.com/careers/job/?gh_jid=123') === 'unknown') {
+    pass('no comparable id (LinkedIn vs greenhouse) → unknown');
+  } else {
+    fail('incomparable ids not reported as unknown');
+  }
+
+  // Ashby / Lever UUIDs
+  const ashby = jobIdentity('https://jobs.ashbyhq.com/acme/cf39e046-40f3-4699-ba64-ee9dcd24056f');
+  if (ashby?.provider === 'ashby' && ashby.id === 'cf39e046-40f3-4699-ba64-ee9dcd24056f') {
+    pass('ashby uuid extracted');
+  } else {
+    fail(`ashby uuid wrong: ${JSON.stringify(ashby)}`);
+  }
+} catch (e) {
+  fail(`job-identity unit tests crashed: ${e.message}`);
+}
+
+// ── 13b. SENIORITY-LEVEL VETO (false title merges) ──────────────
+
+console.log('\n13b. Seniority-level veto');
+
+try {
+  const { levelVerdict, wordRank, numLevels } = await import(pathToFileURL(join(ROOT, 'role-level.mjs')).href);
+
+  const cases = [
+    // [a, b, expected, why]
+    ['Senior Software Engineer', 'Staff Software Engineer', 'distinct', 'Senior vs Staff'],
+    ['SDE II', 'SDE III', 'distinct', 'roman II vs III'],
+    ['SDE2', 'SDE3', 'distinct', 'glued SDE2 vs SDE3'],
+    ['SDE2', 'SDE II', 'unknown', 'glued "2" and roman "II" are the SAME level → mergeable'],
+    ['SDE 2', 'SDE III', 'distinct', 'spaced arabic 2 vs roman III'],
+    ['SDE II', 'SDE 3', 'distinct', 'roman II vs spaced arabic 3'],
+    ['Software Engineer L4', 'Software Engineer L5', 'distinct', 'L4 vs L5 code'],
+    ['Software Engineer', 'Senior Software Engineer', 'distinct', 'bare vs Senior (BARE_IS_A_LEVEL)'],
+    ['Senior Backend Engineer', 'Senior Backend Engineer', 'unknown', 'same level → fall through to title match'],
+    ['Backend Engineer', 'Backend Developer', 'unknown', 'no level signal either side'],
+    ['SDE II', 'SDE II', 'unknown', 'same roman level'],
+    ['VP of Engineering', 'Director of Engineering', 'unknown', 'management — untouched, no veto'],
+    ['Senior Engineering Manager', 'Engineering Manager', 'unknown', 'management ladder left alone'],
+  ];
+  let ok = true;
+  for (const [a, b, want, why] of cases) {
+    const got = levelVerdict(a, b);
+    if (got !== want) { ok = false; fail(`levelVerdict("${a}","${b}") = ${got}, want ${want} (${why})`); }
+  }
+  if (ok) pass(`levelVerdict: all ${cases.length} level cases correct`);
+
+  // Spot-check the extractors directly
+  if (wordRank('Staff SWE') === 5 && wordRank('Senior SWE') === 4 && wordRank('VP Eng') === null) {
+    pass('wordRank maps IC ladder, nulls management');
+  } else {
+    fail(`wordRank wrong: staff=${wordRank('Staff SWE')} senior=${wordRank('Senior SWE')} vp=${wordRank('VP Eng')}`);
+  }
+  if (numLevels('SDE III').has(3) && numLevels('Engineer L5').has(5) && numLevels('Backend Engineer').size === 0) {
+    pass('numLevels extracts roman, L-codes, and nothing from bare titles');
+  } else {
+    fail('numLevels extraction wrong');
+  }
+} catch (e) {
+  fail(`level-veto unit tests crashed: ${e.message}`);
+}
+
+// End-to-end: merge must NOT collapse two distinct same-company reqs whose
+// titles fuzzy-match but whose gh_jids differ (regression for #291/#292).
+const veToDir = mkdtempSync(join(tmpdir(), 'career-ops-veto-'));
+try {
+  mkdirSync(join(veToDir, 'data'));
+  mkdirSync(join(veToDir, 'reports'));
+  mkdirSync(join(veToDir, 'batch', 'tracker-additions'), { recursive: true });
+
+  // Existing entry #114 (Greenhouse req A) + its report carrying the URL
+  writeFileSync(join(veToDir, 'reports', '114-databricks-ai-fde-2026-01-01.md'),
+    '# eval\n**URL:** https://databricks.com/company/careers/open-positions/job?gh_jid=8330188002\n');
+  const tracker = join(veToDir, 'data', 'applications.md');
+  writeFileSync(tracker,
+    '# Applications Tracker\n\n' +
+    '| # | Date | Company | Role | Score | Status | PDF | Report | Notes |\n' +
+    '|---|------|---------|------|-------|--------|-----|--------|-------|\n' +
+    '| 114 | 2026-01-01 | Databricks | AI Engineer - FDE (Forward Deployed Engineer) | 1.5/5 | Evaluated | ❌ | [114](../reports/114-databricks-ai-fde-2026-01-01.md) | old |\n');
+
+  // Two new additions, distinct gh_jids, titles that fuzzy-match #114 and each other
+  writeFileSync(join(veToDir, 'reports', '291-databricks-ai-fde-2026-06-18.md'),
+    '# eval\n**URL:** https://databricks.com/company/careers/open-positions/job?gh_jid=8551531002\n');
+  writeFileSync(join(veToDir, 'reports', '292-databricks-fde-full-stack-2026-06-18.md'),
+    '# eval\n**URL:** https://databricks.com/company/careers/open-positions/job?gh_jid=8367942002\n');
+  writeFileSync(join(veToDir, 'batch', 'tracker-additions', '291-databricks.tsv'),
+    '291\t2026-06-18\tDatabricks\tAI Engineer - FDE (Forward Deployed Engineer)\tEvaluated\t2.0/5\t❌\t[291](reports/291-databricks-ai-fde-2026-06-18.md)\tn');
+  writeFileSync(join(veToDir, 'batch', 'tracker-additions', '292-databricks.tsv'),
+    '292\t2026-06-18\tDatabricks\tForward Deployed Engineer (FDE, Full Stack)\tEvaluated\t2.2/5\t❌\t[292](reports/292-databricks-fde-full-stack-2026-06-18.md)\tn');
+
+  // merge-tracker resolves ADDITIONS_DIR relative to its own dir, so run a copy
+  // of the script from inside the fixture tree.
+  const scriptCopy = join(veToDir, 'merge-tracker.mjs');
+  writeFileSync(scriptCopy, readFileSync(join(ROOT, 'merge-tracker.mjs'), 'utf-8'));
+  writeFileSync(join(veToDir, 'tracker-links.mjs'), readFileSync(join(ROOT, 'tracker-links.mjs'), 'utf-8'));
+  writeFileSync(join(veToDir, 'job-identity.mjs'), readFileSync(join(ROOT, 'job-identity.mjs'), 'utf-8'));
+  writeFileSync(join(veToDir, 'role-level.mjs'), readFileSync(join(ROOT, 'role-level.mjs'), 'utf-8'));
+  writeFileSync(join(veToDir, 'states.yml'), existsSync(join(ROOT, 'templates/states.yml'))
+    ? readFileSync(join(ROOT, 'templates/states.yml'), 'utf-8') : '');
+
+  run(NODE, [scriptCopy], { cwd: veToDir });
+  const after = readFileSync(tracker, 'utf-8');
+  const has291 = /\| 291 \|/.test(after) || /291-databricks-ai-fde/.test(after);
+  const has292 = /\| 292 \|/.test(after) || /292-databricks-fde-full-stack/.test(after);
+  const rowCount = (after.match(/^\| \d+ \|/gm) || []).length;
+  if (has291 && has292 && rowCount === 3) {
+    pass('merge keeps #291 and #292 as distinct rows (no collapse onto #114)');
+  } else {
+    fail(`merge collapsed distinct reqs: rows=${rowCount} has291=${has291} has292=${has292}`);
+  }
+} catch (e) {
+  fail(`merge veto e2e test crashed: ${e.message}`);
+} finally {
+  rmSync(veToDir, { recursive: true, force: true });
+}
+
+// End-to-end: verify-pipeline must NOT warn "Possible duplicates" for two
+// same-company/same-title rows whose reports carry DIFFERENT gh_jids (distinct
+// reqs), but MUST still warn when the ids match (true duplicate). Covers the
+// suspect-filtering branch added to verify-pipeline alongside the veto.
+const vpDir = mkdtempSync(join(tmpdir(), 'career-ops-vp-'));
+try {
+  mkdirSync(join(vpDir, 'data'));
+  mkdirSync(join(vpDir, 'reports'));
+  const rpt = (n, jid) =>
+    writeFileSync(join(vpDir, 'reports', `${n}.md`), `# eval\n**URL:** https://acme.com/careers/job?gh_jid=${jid}\n`);
+  rpt(1, 111); rpt(2, 222);   // Acme: distinct reqs → must NOT warn
+  rpt(3, 999); rpt(4, 999);   // Globex: same req → must warn
+  const tracker = join(vpDir, 'data', 'applications.md');
+  const row = (n, co) =>
+    `| ${n} | 2026-06-18 | ${co} | Software Engineer | 3.0/5 | Evaluated | ❌ | [${n}](../reports/${n}.md) | n |`;
+  writeFileSync(tracker,
+    '# Applications Tracker\n\n' +
+    '| # | Date | Company | Role | Score | Status | PDF | Report | Notes |\n' +
+    '|---|------|---------|------|-------|--------|-----|--------|-------|\n' +
+    [row(1, 'Acme'), row(2, 'Acme'), row(3, 'Globex'), row(4, 'Globex')].join('\n') + '\n');
+
+  let out = '';
+  try {
+    out = execFileSync(NODE, [join(ROOT, 'verify-pipeline.mjs')],
+      { cwd: ROOT, encoding: 'utf-8', timeout: 30000, env: { ...process.env, CAREER_OPS_TRACKER: tracker } });
+  } catch (e) {
+    out = (e.stdout || '') + (e.stderr || ''); // exit 1 on unrelated errors is fine; we only read the dup lines
+  }
+  const dupLines = out.split('\n').filter(l => l.includes('Possible duplicates'));
+  const warnsAcme = dupLines.some(l => l.includes('Acme'));
+  const warnsGlobex = dupLines.some(l => l.includes('Globex'));
+  if (!warnsAcme && warnsGlobex) {
+    pass('verify-pipeline suppresses dup warning for distinct gh_jids, keeps it for matching ids');
+  } else {
+    fail(`verify-pipeline dup veto wrong: warnsAcme=${warnsAcme} warnsGlobex=${warnsGlobex}\n${dupLines.join('\n')}`);
+  }
+} catch (e) {
+  fail(`verify-pipeline veto e2e test crashed: ${e.message}`);
+} finally {
+  rmSync(vpDir, { recursive: true, force: true });
+}
+
 // ── SUMMARY ─────────────────────────────────────────────────────
 
 console.log('\n' + '='.repeat(50));

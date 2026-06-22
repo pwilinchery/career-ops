@@ -26,6 +26,23 @@ var (
 	reBatchID        = regexp.MustCompile(`(?m)^\*\*Batch ID:\*\*\s*(\d+)`)
 )
 
+// normalizeReportPath rewrites a tracker report link (relative to the tracker
+// file's directory) into a path relative to careerOpsPath, so that
+// filepath.Join(careerOpsPath, result) resolves to the report file regardless
+// of whether the tracker lives at the root or in data/. Absolute links and
+// links that escape careerOpsPath are returned unchanged.
+func normalizeReportPath(careerOpsPath, trackerDir, link string) string {
+	if filepath.IsAbs(link) {
+		return link
+	}
+	resolved := filepath.Join(trackerDir, link)
+	rel, err := filepath.Rel(careerOpsPath, resolved)
+	if err != nil || strings.HasPrefix(rel, "..") {
+		return link
+	}
+	return rel
+}
+
 // ParseApplications reads applications.md and returns parsed applications.
 // It tries both {path}/applications.md and {path}/data/applications.md for compatibility.
 func ParseApplications(careerOpsPath string) []model.CareerApplication {
@@ -39,6 +56,12 @@ func ParseApplications(careerOpsPath string) []model.CareerApplication {
 			return nil
 		}
 	}
+
+	// Report links in the tracker are written relative to the tracker file's
+	// own directory (e.g. "../reports/..." when the tracker is at data/applications.md).
+	// Resolve them against trackerDir, then re-root them relative to careerOpsPath so
+	// downstream filepath.Join(careerOpsPath, ReportPath) calls find the file.
+	trackerDir := filepath.Dir(filePath)
 
 	lines := strings.Split(string(content), "\n")
 	apps := make([]model.CareerApplication, 0)
@@ -99,7 +122,7 @@ func ParseApplications(careerOpsPath string) []model.CareerApplication {
 		// Parse report link
 		if rm := reReportLink.FindStringSubmatch(fields[7]); rm != nil {
 			app.ReportNumber = rm[1]
-			app.ReportPath = rm[2]
+			app.ReportPath = normalizeReportPath(careerOpsPath, trackerDir, rm[2])
 		}
 
 		// Notes (field 8 if exists)

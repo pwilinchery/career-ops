@@ -43,6 +43,12 @@ The evaluation uses 6 blocks (A-F) with a global score of 1-5:
 - 3.5-3.9 → Decent but not ideal, apply only if specific reason
 - Below 3.5 → Recommend against applying (see Ethical Use in AGENTS.md)
 
+**Status from score (auto-SKIP rule):** The score is the *fit number*; the tracker status is the *decision*. When writing a tracker status:
+- **Score < 2.5 → status `SKIP`** automatically. Never leave a sub-2.5 evaluation as `Evaluated`.
+- Score 2.5-3.9 → `Evaluated` (decision pending; apply only with a specific reason).
+- Score 4.0+ → `Evaluated`, apply tier.
+- **Never downgrade a funnel row:** auto-SKIP only ever replaces `Evaluated`. Do NOT touch a row already at `Applied`, `Responded`, `Interview`, `Offer`, `Rejected`, or `Discarded` (a closed/dead posting stays `Discarded` regardless of score).
+
 ## Posting Legitimacy (Block G)
 
 Block G assesses whether a posting is likely a real, active opening. It does NOT affect the 1-5 global score -- it is a separate qualitative assessment.
