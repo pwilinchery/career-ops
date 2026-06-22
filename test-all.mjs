@@ -509,6 +509,64 @@ try {
 } catch (e) {
   fail(`always_allow tests crashed: ${e.message}`);
 }
+
+// ── 11b. TITLE FILTER — per-word whole-word matching ──────────────
+
+console.log('\n11b. Title filter — whole-word matching');
+
+try {
+  const { buildTitleFilter } = await import(pathToFileURL(join(ROOT, 'scan.mjs')).href);
+
+  // DER as whole-word must not substring-match "Fe-DER-al"; "Account
+  // Executive" negative catches the sales role either way.
+  const filter = buildTitleFilter({
+    positive: [
+      'Software Engineer',
+      { word: 'DER', partial: false },
+      { word: 'Wind', partial: false },
+      'Developer',
+    ],
+    negative: ['Account Executive'],
+  });
+
+  if (filter('Public Sector Strategic Account Executive, Federal Civilian') === false)
+    pass('whole-word DER no longer trips on "Fe-DER-al" sales title');
+  else fail('Federal AE title should be rejected — DER must not substring-match "Federal"');
+
+  if (filter('DER Controls Software Engineer') === true) pass('real "DER ..." title still matches whole-word');
+  else fail('a genuine DER role should still pass');
+
+  if (filter('Senior Wind Turbine Engineer') === true) pass('real "Wind ..." title matches whole-word');
+  else fail('a genuine Wind role should still pass');
+
+  // "Windsor" must not be matched by whole-word "Wind"; it only passes here
+  // because "Software Engineer" is present — proving Wind itself didn't trip.
+  if (filter('Marketing Lead, Windsor') === false) pass('whole-word Wind does not substring-match "Windsor"');
+  else fail('"Windsor" alone (no positive) should be rejected — Wind must not trip');
+
+  // Plain-string entries keep substring behavior (backward compatible).
+  if (filter('Senior Developer') === true) pass('plain-string "Developer" still matches as substring');
+  else fail('plain-string keywords must keep substring matching');
+
+  // A tuple with partial:true (or omitted) behaves like a plain string.
+  const explicitPartial = buildTitleFilter({ positive: [{ word: 'Developer', partial: true }] });
+  if (explicitPartial('Lead Developer II') === true) pass('tuple { partial: true } matches as substring');
+  else fail('{ partial: true } should behave like a plain string');
+
+  const defaultPartial = buildTitleFilter({ positive: [{ word: 'Developer' }] });
+  if (defaultPartial('Lead Developer II') === true) pass('tuple with omitted partial defaults to substring');
+  else fail('omitted partial should default to substring (true)');
+
+  // Malformed entries are dropped without crashing.
+  const messy = buildTitleFilter({ positive: [null, 42, { partial: false }, 'Engineer'] });
+  if (messy('Data Engineer') === true && messy('Random Title') === false)
+    pass('malformed title-filter entries are dropped without crashing');
+  else fail('malformed entries should be dropped, leaving valid ones working');
+
+} catch (e) {
+  fail(`title-filter whole-word tests crashed: ${e.message}`);
+}
+
 // ── 12. FOLLOW-UP CADENCE LOGIC ─────────────────────────────────
 
 console.log('\n12. Follow-up cadence logic');

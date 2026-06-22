@@ -118,14 +118,47 @@ function resolveProvider(entry, providers, { skipIds = [] } = {}) {
 
 // ── Title filter ────────────────────────────────────────────────────
 
-function buildTitleFilter(titleFilter) {
-  const positive = (titleFilter?.positive || []).map(k => k.toLowerCase());
-  const negative = (titleFilter?.negative || []).map(k => k.toLowerCase());
+// Normalize a title_filter entry into { text, partial }. An entry is either:
+//   - a plain string         → partial (substring) match, the default and
+//                              backward-compatible behavior
+//   - a tuple { word, partial } → opt a specific keyword into whole-word
+//                              matching with `partial: false`
+// `partial` defaults to true when omitted. Malformed entries (no string
+// `word`) collapse to null and are dropped by the caller.
+function normalizeTitleEntry(entry) {
+  if (typeof entry === 'string') return { text: entry.toLowerCase(), partial: true };
+  if (entry && typeof entry === 'object' && typeof entry.word === 'string') {
+    return { text: entry.word.toLowerCase(), partial: entry.partial !== false };
+  }
+  return null;
+}
+
+// Compile one normalized entry to a matcher over an already-lowercased title.
+// Partial entries use plain substring matching (so "Developer" still catches
+// "Senior Developer"). Whole-word entries match on alphanumeric boundaries so
+// short/ambiguous tokens like "DER", "PV" or "Wind" don't substring-match into
+// unrelated words ("Fe-DER-al", "Windsor"). Boundaries are asserted only on the
+// side where the keyword's own edge is alphanumeric, so special-char keywords
+// (".NET", "C#") still work if ever flagged whole-word.
+function buildKeywordMatcher({ text, partial }) {
+  if (partial) return (lowerTitle) => lowerTitle.includes(text);
+  const esc = text.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  const left = /^[a-z0-9]/.test(text) ? '(?<![a-z0-9])' : '';
+  const right = /[a-z0-9]$/.test(text) ? '(?![a-z0-9])' : '';
+  const re = new RegExp(left + esc + right);
+  return (lowerTitle) => re.test(lowerTitle);
+}
+
+export function buildTitleFilter(titleFilter) {
+  const positive = (titleFilter?.positive || [])
+    .map(normalizeTitleEntry).filter(Boolean).map(buildKeywordMatcher);
+  const negative = (titleFilter?.negative || [])
+    .map(normalizeTitleEntry).filter(Boolean).map(buildKeywordMatcher);
 
   return (title) => {
     const lower = title.toLowerCase();
-    const hasPositive = positive.length === 0 || positive.some(k => lower.includes(k));
-    const hasNegative = negative.some(k => lower.includes(k));
+    const hasPositive = positive.length === 0 || positive.some(m => m(lower));
+    const hasNegative = negative.some(m => m(lower));
     return hasPositive && !hasNegative;
   };
 }
