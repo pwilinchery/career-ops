@@ -60,6 +60,12 @@ func ParseApplications(careerOpsPath string) []model.CareerApplication {
 		}
 	}
 
+	// Report links in the tracker are written relative to the tracker file's
+	// own directory (e.g. "../reports/..." when the tracker is at data/applications.md).
+	// Resolve them against trackerDir, then re-root them relative to careerOpsPath so
+	// downstream filepath.Join(careerOpsPath, ReportPath) calls find the file.
+	trackerDir := filepath.Dir(filePath)
+
 	lines := strings.Split(string(content), "\n")
 	apps := make([]model.CareerApplication, 0)
 	num := 0

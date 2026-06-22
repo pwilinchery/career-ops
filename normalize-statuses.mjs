@@ -8,6 +8,9 @@
  * Also strips markdown bold (**) and dates from the status field,
  * moving DUPLICADO info to the notes column.
  *
+ * Auto-SKIP: any row scoring < 2.5 with status Evaluated is set to SKIP
+ * (decision follows fit; see modes/_shared.md). Funnel rows are never downgraded.
+ *
  * Run: node career-ops/normalize-statuses.mjs [--dry-run]
  */
 
@@ -132,6 +135,16 @@ for (let i = 0; i < lines.length; i++) {
   if (result.unknown) {
     unknowns.push({ num, rawStatus, line: i + 1 });
     continue;
+  }
+
+  // Auto-SKIP rule (see modes/_shared.md): score < 2.5 → SKIP.
+  // Only ever replaces Evaluated — never downgrades a funnel row
+  // (Applied/Responded/Interview/Offer/Rejected/Discarded).
+  if (result.status === 'Evaluated') {
+    const score = parseFloat((parts[5] || '').replace(/\*\*/g, ''));
+    if (!isNaN(score) && score < 2.5) {
+      result.status = 'SKIP';
+    }
   }
 
   if (result.status === rawStatus) continue; // Already canonical

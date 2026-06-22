@@ -17,6 +17,7 @@
 import { readFileSync, readdirSync, existsSync, mkdirSync, unlinkSync, statSync } from 'fs';
 import { join, dirname } from 'path';
 import { fileURLToPath } from 'url';
+import { dupeVerdict, urlFromReport } from './job-identity.mjs';
 
 const CAREER_OPS = dirname(fileURLToPath(import.meta.url));
 // Support both layouts: data/applications.md (boilerplate) and applications.md (original).
@@ -26,6 +27,7 @@ const APPS_FILE = process.env.CAREER_OPS_TRACKER
   : existsSync(join(CAREER_OPS, 'data/applications.md'))
     ? join(CAREER_OPS, 'data/applications.md')
     : join(CAREER_OPS, 'applications.md');
+const TRACKER_DIR = dirname(APPS_FILE);
 const ADDITIONS_DIR = join(CAREER_OPS, 'batch/tracker-additions');
 const REPORTS_DIR = join(CAREER_OPS, 'reports');
 const STATES_FILE = existsSync(join(CAREER_OPS, 'templates/states.yml'))
@@ -152,8 +154,15 @@ for (const e of entries) {
   companyRoleMap.get(key).push(e);
 }
 for (const [key, group] of companyRoleMap) {
-  if (group.length > 1) {
-    warn(`Possible duplicates: ${group.map(e => `#${e.num}`).join(', ')} (${group[0].company} — ${group[0].role})`);
+  if (group.length <= 1) continue;
+  // A shared company+title is only a real duplicate if the postings aren't
+  // provably distinct openings. Drop members whose ATS requisition IDs prove
+  // they're separate reqs; warn only on the remainder (same/incomparable IDs).
+  const urls = group.map(e => urlFromReport(e.report, TRACKER_DIR));
+  const suspect = group.filter((e, i) =>
+    group.some((other, j) => i !== j && dupeVerdict(urls[i], urls[j]) !== 'distinct'));
+  if (suspect.length > 1) {
+    warn(`Possible duplicates: ${suspect.map(e => `#${e.num}`).join(', ')} (${suspect[0].company} — ${suspect[0].role})`);
     dupes++;
   }
 }
@@ -164,7 +173,6 @@ if (dupes === 0) ok('No exact duplicates found');
 // links must resolve against the tracker's own directory (see #760). For the
 // transition we also accept legacy root-relative links: try the tracker dir
 // first, then fall back to the repo root before flagging a link broken.
-const TRACKER_DIR = dirname(APPS_FILE);
 let brokenReports = 0;
 for (const e of entries) {
   const match = e.report.match(/\]\(([^)]+)\)/);
