@@ -112,6 +112,19 @@ language:
 # See the tier -> model mapping table in modes/_shared.md.
 spend_tier: standard
 
+# (Optional) Tracker behavior. Omit the whole block to keep the defaults.
+#
+# auto_skip_below -- when set, an evaluation scoring under this is recorded as
+# SKIP rather than left at Evaluated, so the tracker distinguishes "decided
+# against" from "still open". Where to draw that line depends on how selective
+# your search is, so there is no default: leave the key out (or null) and
+# statuses are never rewritten. 2.5 is a reasonable starting point.
+#
+# Only ever replaces Evaluated. A row already at Applied, Responded, Interview,
+# Offer, Rejected, or Discarded is never downgraded.
+# tracker:
+#   auto_skip_below: 2.5
+
 # (Optional) Visual theming for the generated CV and cover-letter PDFs (#1837).
 # Each token is injected as a CSS custom property that overrides the template
 # default — omit the block (or any key) to keep the built-in look unchanged.

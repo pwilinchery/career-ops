@@ -75,6 +75,15 @@ The evaluation uses 6 blocks (A-F) with a global score of 1-5:
 - 3.5-3.9 → Decent but not ideal, apply only if specific reason
 - Below 3.5 → Recommend against applying (see Ethical Use in AGENTS.md)
 
+**Status from score (auto-SKIP rule, opt-in):** The score is the *fit number*; the tracker status is the *decision*. This rule applies **only when `tracker.auto_skip_below` is set in `config/profile.yml`** — if the key is absent, write `Evaluated` as usual and ignore the rest of this section.
+
+When it is set, call the configured value `T` (a common choice is 2.5):
+- **Score < `T` → status `SKIP`.** Never leave such an evaluation sitting at `Evaluated`, where it reads as an open question rather than a decision.
+- Score >= `T` → `Evaluated` (below 3.5 still means apply only with a specific reason; see the interpretation scale above).
+- **Never downgrade a funnel row:** auto-SKIP only ever replaces `Evaluated`. Do NOT touch a row already at `Applied`, `Responded`, `Interview`, `Offer`, `Rejected`, or `Discarded` — a closed or dead posting stays `Discarded` regardless of score.
+
+`normalize-statuses.mjs` enforces this deterministically from the same config key, so the rule holds even when an evaluation writes the status by hand.
+
 **How to score the "Cultural signals" dimension:**
 1. Read `culture_screen.require` from `config/profile.yml`. If `culture_screen` is missing or empty, skip the structural capping and score the dimension qualitatively based on company size, remote policy, and stability.
 2. Actively look for evidence in the JD + Block G company research corresponding to those requirements (e.g., team size mentions, org-chart depth/manager layers, meeting-culture language, company stage).

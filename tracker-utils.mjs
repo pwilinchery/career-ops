@@ -21,6 +21,45 @@ import yaml from 'js-yaml';
 export const OWNERLESS_GRACE_MS = 1_000;
 
 /**
+ * A commonly useful auto-SKIP cutoff, for documentation and examples only.
+ *
+ * This is NOT applied as a default: the rule is opt-in (see
+ * `resolveAutoSkipBelow`). Exported so the example profile and any future
+ * onboarding prompt can suggest one number instead of drifting copies.
+ */
+export const SUGGESTED_AUTO_SKIP_BELOW = 2.5;
+
+/**
+ * Resolve the auto-SKIP cutoff from `tracker.auto_skip_below` in a profile.
+ *
+ * The rule is **opt-in**: it applies only when the key holds a valid score.
+ * Every other case -- key absent, file missing, YAML unparseable, value
+ * `null`/`false`/non-numeric/out-of-range -- returns `null`, leaving statuses
+ * untouched.
+ *
+ * Failing closed matters here because the alternative silently rewrites a
+ * user's tracker. A malformed value must never be applied literally either: a
+ * stray `99` would SKIP every row in the file.
+ *
+ * @param {string} profilePath path to config/profile.yml
+ * @returns {number|null} the cutoff, or null when the rule is off
+ */
+export function resolveAutoSkipBelow(profilePath) {
+  try {
+    if (!profilePath || !existsSync(profilePath)) return null;
+    const raw = yaml.load(readFileSync(profilePath, 'utf-8')) || {};
+    const v = raw?.tracker?.auto_skip_below;
+    if (v === null || v === undefined || v === false) return null;
+    const n = Number(v);
+    // Scores are on a 1-5 scale. Anything outside it is a config error, and the
+    // safe reading of a config error is "do nothing".
+    return Number.isFinite(n) && n >= 0 && n <= 5 ? n : null;
+  } catch {
+    return null;
+  }
+}
+
+/**
  * Rebuild a markdown table row from the cells produced by `line.split('|')`.
  *
  * `split('|')` yields a leading empty element (before the opening `|`) and,

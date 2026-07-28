@@ -7568,6 +7568,136 @@ try {
   fail(`dedup row-rebuild notes test crashed: ${e.message}`);
 }
 
+// AUTO-SKIP: score is the fit number, status is the decision. A sub-2.5 row
+// left at Evaluated reads as an open question rather than a decision. The rule
+// may only ever replace Evaluated -- downgrading a funnel row would rewrite
+// history (a closed posting stays Discarded no matter what it scored).
+console.log('\n🧪 Testing normalize-statuses auto-SKIP for sub-2.5 scores...');
+try {
+  const skipTmp = mkdtempSync(join(tmpdir(), 'career-ops-autoskip-'));
+  try {
+    mkdirSync(join(skipTmp, 'data'));
+    const tracker = join(skipTmp, 'data', 'applications.md');
+    writeFileSync(tracker,
+      '# Applications Tracker\n\n' +
+      '| # | Date | Company | Role | Score | Status | PDF | Report | Notes |\n' +
+      '|---|------|---------|------|-------|--------|-----|--------|-------|\n' +
+      '| 1 | 2026-03-01 | LowFit Inc | Backend Engineer | 2.0/5 | Evaluated | ❌ | [1](../reports/001-lowfit.md) | poor fit |\n' +
+      '| 2 | 2026-03-02 | EdgeCase Co | Backend Engineer | 2.5/5 | Evaluated | ❌ | [2](../reports/002-edge.md) | exactly at threshold |\n' +
+      '| 3 | 2026-03-03 | GoodFit Ltd | Backend Engineer | 4.2/5 | Evaluated | ❌ | [3](../reports/003-good.md) | strong |\n' +
+      '| 4 | 2026-03-04 | Applied Corp | Backend Engineer | 1.5/5 | Applied | ❌ | [4](../reports/004-applied.md) | already applied |\n' +
+      '| 5 | 2026-03-05 | Closed Corp | Backend Engineer | 1.0/5 | Discarded | ❌ | [5](../reports/005-closed.md) | posting dead |\n');
+
+    // The rule is opt-in, so the fixture profile has to turn it on.
+    const profile = join(skipTmp, 'profile.yml');
+    writeFileSync(profile, 'tracker:\n  auto_skip_below: 2.5\n');
+
+    const r = run(NODE, ['normalize-statuses.mjs'], {
+      env: { ...process.env, CAREER_OPS_TRACKER: tracker, CAREER_OPS_PROFILE: profile },
+    });
+    if (r === null) {
+      fail('normalize-statuses.mjs crashed during auto-SKIP test');
+    } else {
+      const rowFor = (n) => (readFileSync(tracker, 'utf-8').split('\n').find(l => l.startsWith(`| ${n} |`)) || '');
+      if (rowFor(1).includes('SKIP')) {
+        pass('score 2.0 with status Evaluated is auto-SKIPped');
+      } else {
+        fail(`score 2.0 was not auto-SKIPped: "${rowFor(1)}"`);
+      }
+      // 2.5 is NOT below 2.5 -- the boundary must not be inclusive.
+      if (rowFor(2).includes('Evaluated')) {
+        pass('score exactly 2.5 stays Evaluated (threshold is strict <)');
+      } else {
+        fail(`score 2.5 was wrongly downgraded: "${rowFor(2)}"`);
+      }
+      if (rowFor(3).includes('Evaluated')) {
+        pass('score 4.2 stays Evaluated');
+      } else {
+        fail(`score 4.2 was wrongly changed: "${rowFor(3)}"`);
+      }
+      if (rowFor(4).includes('Applied') && !rowFor(4).includes('SKIP')) {
+        pass('funnel row Applied is never downgraded by auto-SKIP');
+      } else {
+        fail(`auto-SKIP downgraded a funnel row: "${rowFor(4)}"`);
+      }
+      if (rowFor(5).includes('Discarded') && !rowFor(5).includes('SKIP')) {
+        pass('funnel row Discarded is never downgraded by auto-SKIP');
+      } else {
+        fail(`auto-SKIP downgraded a Discarded row: "${rowFor(5)}"`);
+      }
+    }
+
+    // Opt-in check: with no auto_skip_below configured, a sub-threshold row
+    // must survive untouched. This is the default path for every user who
+    // never sets the key, so getting it wrong rewrites trackers silently.
+    const offTracker = join(skipTmp, 'off-applications.md');
+    writeFileSync(offTracker,
+      '# Applications Tracker\n\n' +
+      '| # | Date | Company | Role | Score | Status | PDF | Report | Notes |\n' +
+      '|---|------|---------|------|-------|--------|-----|--------|-------|\n' +
+      '| 1 | 2026-03-01 | LowFit Inc | Backend Engineer | 2.0/5 | Evaluated | ❌ | [1](../reports/001-lowfit.md) | poor fit |\n');
+    const offProfile = join(skipTmp, 'off-profile.yml');
+    writeFileSync(offProfile, 'candidate:\n  name: Someone\n');
+    const off = run(NODE, ['normalize-statuses.mjs'], {
+      env: { ...process.env, CAREER_OPS_TRACKER: offTracker, CAREER_OPS_PROFILE: offProfile },
+    });
+    if (off === null) {
+      fail('normalize-statuses.mjs crashed during auto-SKIP opt-in test');
+    } else if (readFileSync(offTracker, 'utf-8').includes('Evaluated')) {
+      pass('unconfigured profile leaves a sub-threshold row at Evaluated (opt-in)');
+    } else {
+      fail('auto-SKIP fired without tracker.auto_skip_below configured');
+    }
+  } finally {
+    rmSync(skipTmp, { recursive: true, force: true });
+  }
+} catch (e) {
+  fail(`auto-SKIP tests crashed: ${e.message}`);
+}
+
+// The auto-SKIP cutoff is a judgement call, so it is configurable via
+// tracker.auto_skip_below. A malformed value must fall back to the default
+// rather than disable the rule or skip every row.
+console.log('\n🧪 Testing auto-SKIP threshold configuration...');
+try {
+  const { resolveAutoSkipBelow } =
+    await import(pathToFileURL(join(ROOT, 'tracker-utils.mjs')).href);
+  const cfgTmp = mkdtempSync(join(tmpdir(), 'career-ops-skipcfg-'));
+  try {
+    const write = (body) => {
+      const p = join(cfgTmp, `p${Math.random().toString(36).slice(2)}.yml`);
+      writeFileSync(p, body);
+      return p;
+    };
+    // The rule is opt-in: only a valid in-range score turns it on. Everything
+    // else must leave statuses alone rather than rewrite a user's tracker.
+    const cases = [
+      ['tracker:\n  auto_skip_below: 3.0\n', 3.0, 'explicit numeric cutoff is honored'],
+      ['tracker:\n  auto_skip_below: 0\n', 0, 'zero is a valid cutoff, not a disable'],
+      ['tracker:\n  auto_skip_below: null\n', null, 'null leaves the rule off'],
+      ['tracker:\n  auto_skip_below: false\n', null, 'false leaves the rule off'],
+      ['candidate:\n  name: X\n', null, 'absent key leaves the rule off (opt-in)'],
+      ['tracker:\n  other_key: 1\n', null, 'tracker block without the key leaves the rule off'],
+      ['tracker:\n  auto_skip_below: "nope"\n', null, 'non-numeric leaves the rule off'],
+      ['tracker:\n  auto_skip_below: 99\n', null, 'out-of-range leaves the rule off (does not SKIP everything)'],
+      ['{ this: is: not: valid yaml\n', null, 'malformed YAML leaves the rule off'],
+      ['', null, 'empty profile leaves the rule off'],
+    ];
+    for (const [body, expected, label] of cases) {
+      const got = resolveAutoSkipBelow(write(body));
+      if (got === expected) pass(`auto-SKIP config: ${label}`);
+      else fail(`auto-SKIP config: ${label} -- expected ${expected}, got ${got}`);
+    }
+    const missing = resolveAutoSkipBelow(join(cfgTmp, 'does-not-exist.yml'));
+    if (missing === null) pass('auto-SKIP config: missing profile leaves the rule off');
+    else fail(`auto-SKIP config: missing profile returned ${missing}`);
+  } finally {
+    rmSync(cfgTmp, { recursive: true, force: true });
+  }
+} catch (e) {
+  fail(`auto-SKIP config tests crashed: ${e.message}`);
+}
+
 // rebuildRow() is now shared from tracker-utils.mjs (extracted from the two
 // copies introduced in #1004). Unit-test the helper contract directly.
 console.log('\n🧪 Testing shared tracker-utils rebuildRow()...');

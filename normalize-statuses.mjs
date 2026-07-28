@@ -15,7 +15,7 @@ import { readFileSync, copyFileSync, existsSync, mkdirSync } from 'fs';
 import { join, dirname } from 'path';
 import { fileURLToPath } from 'url';
 import {
-  openTrackerTransaction, rebuildRow, resolveTrackerPath,
+  openTrackerTransaction, rebuildRow, resolveTrackerPath, resolveAutoSkipBelow,
 } from './tracker-utils.mjs';
 import { resolveColumns, parseTrackerRow } from './tracker-parse.mjs';
 
@@ -25,6 +25,10 @@ const DRY_RUN = process.argv.includes('--dry-run');
 
 // Ensure required directories exist (fresh setup)
 mkdirSync(join(CAREER_OPS, 'data'), { recursive: true });
+
+const AUTO_SKIP_BELOW = resolveAutoSkipBelow(
+  process.env.CAREER_OPS_PROFILE || join(CAREER_OPS, 'config/profile.yml'),
+);
 
 // Canonical status mapping
 function normalizeStatus(raw) {
@@ -133,6 +137,23 @@ for (let i = 0; i < lines.length; i++) {
   if (result.unknown) {
     unknowns.push({ num, rawStatus, line: i + 1 });
     continue;
+  }
+
+  // Auto-SKIP (see modes/_shared.md): the score is the fit number, the status
+  // is the decision, and a low enough fit is a decision. Leaving those rows at
+  // Evaluated makes the tracker read as if they were still open questions.
+  //
+  // Opt-in: AUTO_SKIP_BELOW is null unless tracker.auto_skip_below is set, so
+  // a profile that never configures it sees no status rewriting at all.
+  //
+  // Only ever replaces Evaluated, so a funnel row (Applied / Responded /
+  // Interview / Offer / Rejected / Discarded) is never downgraded -- a closed
+  // posting stays Discarded no matter what it scored.
+  if (AUTO_SKIP_BELOW != null && result.status === 'Evaluated' && COLS.score != null) {
+    const score = parseFloat((parts[COLS.score] || '').replace(/\*\*/g, ''));
+    if (Number.isFinite(score) && score < AUTO_SKIP_BELOW) {
+      result.status = 'SKIP';
+    }
   }
 
   if (result.status === rawStatus) continue; // Already canonical
