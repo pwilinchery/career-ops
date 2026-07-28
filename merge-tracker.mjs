@@ -593,6 +593,10 @@ console.log(`📊 Existing: ${existingApps.length} entries, max #${maxNum}`);
 let added = 0;
 let updated = 0;
 let skipped = 0;
+// Existing rows already resolved by an addition in THIS run. Two distinct
+// additions cannot both be the same single existing entry, so the second one
+// must not overwrite the first - it is kept as its own row instead.
+const claimed = new Set();
 const pdfIndex = loadPdfIndex();
 const pdfSynced = syncPdfFlags(existingApps, appLines, pdfIndex);
 updated += pdfSynced;
@@ -721,6 +725,18 @@ for (const file of tsvFiles) {
     });
   }
 
+  // A previous addition in this run already updated (or deliberately skipped)
+  // this exact row. Collapsing a second, distinct addition onto it would
+  // silently overwrite the first and lose one of the two evaluations. Fall
+  // through to the new-entry path so it is kept as its own row.
+  if (duplicate && claimed.has(duplicate.num)) {
+    console.warn(
+      `!  Row #${duplicate.num} already resolved this run; keeping ` +
+      `${addition.company} - ${addition.role} as a separate entry.`,
+    );
+    duplicate = null;
+  }
+
   if (duplicate) {
     const newScore = parseScore(addition.score);
     const oldScore = parseScore(duplicate.score);
@@ -740,10 +756,16 @@ for (const file of tsvFiles) {
           notes: `Re-eval ${addition.date} (${oldScore}→${newScore}). ${addition.notes}`,
         });
         appLines[lineIdx] = updatedLine;
+        // Reflect the write back onto the parsed row so a later addition in this
+        // run compares against the updated values, and mark it claimed.
+        duplicate.raw = updatedLine;
+        duplicate.score = addition.score;
+        claimed.add(duplicate.num);
         updated++;
       }
     } else {
       console.log(`⏭️  Skip: ${addition.company} — ${addition.role} (existing #${duplicate.num} ${oldScore} >= new ${newScore})`);
+      claimed.add(duplicate.num);
       skipped++;
     }
   } else {

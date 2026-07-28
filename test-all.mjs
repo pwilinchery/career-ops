@@ -8025,6 +8025,62 @@ try {
   fail(`non-Latin via guard tests crashed: ${e.message}`);
 }
 
+// MERGE-TRACKER: ONE EXISTING ROW CANNOT ABSORB TWO DISTINCT ADDITIONS
+// Tier-3 dedup is company + fuzzy role. Two genuinely different postings can
+// both fuzzy-match the SAME older row. Processed in sequence, the first
+// updated it and the second overwrote that update -- one of the two
+// evaluations was silently lost, leaving a single row. An existing row
+// resolved once in a run is claimed; a second matching addition is kept as
+// its own entry instead.
+console.log('\n🧪 Testing merge-tracker one-row-absorbs-two-additions guard...');
+try {
+  const claimTmp = mkdtempSync(join(tmpdir(), 'career-ops-claim-'));
+  try {
+    mkdirSync(join(claimTmp, 'data'));
+    mkdirSync(join(claimTmp, 'reports'));
+    const additionsDir = join(claimTmp, 'additions');
+    mkdirSync(additionsDir);
+    const tracker = join(claimTmp, 'data', 'applications.md');
+    writeFileSync(tracker,
+      '# Applications Tracker\n\n' +
+      '| # | Date | Company | Role | Score | Status | PDF | Report | Notes |\n' +
+      '|---|------|---------|------|-------|--------|-----|--------|-------|\n' +
+      '| 1 | 2026-01-04 | Acme Corp | Software Engineer, Payments | 3.0/5 | Evaluated | ❌ | [1](../reports/001-acme-2026-01-04.md) | first pass |\n');
+    for (const n of ['001-acme-2026-01-04', '002-acme-2026-01-05', '003-acme-2026-01-06']) {
+      writeFileSync(join(claimTmp, 'reports', `${n}.md`), '# fixture\n');
+    }
+    // Two DIFFERENT Acme postings, both sharing the discriminating token
+    // "Payments" with the existing row, so both fuzzy-match it.
+    writeFileSync(join(additionsDir, '002-acme.tsv'),
+      '2\t2026-01-05\tAcme Corp\tSoftware Engineer, Payments Platform\tEvaluated\t4.0/5\t❌\t[2](reports/002-acme-2026-01-05.md)\tplatform team\n');
+    writeFileSync(join(additionsDir, '003-acme.tsv'),
+      '3\t2026-01-06\tAcme Corp\tSoftware Engineer, Payments Team\tEvaluated\t4.5/5\t❌\t[3](reports/003-acme-2026-01-06.md)\tsecond posting\n');
+
+    const claimResult = run(NODE, ['merge-tracker.mjs'], { env: { ...process.env, CAREER_OPS_TRACKER: tracker, CAREER_OPS_ADDITIONS: additionsDir } });
+    if (claimResult === null) {
+      fail('merge-tracker.mjs crashed during one-row-absorbs-two-additions test');
+    } else {
+      const merged = readFileSync(tracker, 'utf-8');
+      const dataRows = merged.split('\n').filter(l => l.startsWith('|') && l.includes('Acme Corp'));
+      if (dataRows.length >= 2) {
+        pass('two distinct additions matching one row do not collapse into a single row');
+      } else {
+        fail(`two distinct additions collapsed onto one row - an evaluation was lost (${dataRows.length} Acme row(s))`);
+      }
+      // Neither evaluation may vanish: both scores must survive somewhere.
+      if (merged.includes('4.0/5') && merged.includes('4.5/5')) {
+        pass('both evaluations survive the merge (neither silently overwritten)');
+      } else {
+        fail(`an evaluation was overwritten: 4.0/5 present=${merged.includes('4.0/5')}, 4.5/5 present=${merged.includes('4.5/5')}`);
+      }
+    }
+  } finally {
+    rmSync(claimTmp, { recursive: true, force: true });
+  }
+} catch (e) {
+  fail(`one-row-absorbs-two-additions tests crashed: ${e.message}`);
+}
+
 // ── MERGE-TRACKER TSV COLUMN-ORDER TOLERANCE (#1427) ─────────────
 // Batch TSVs write (status, score); applications.md is (score, status). A
 // generator that swaps the two must not merge silently — the score column is
