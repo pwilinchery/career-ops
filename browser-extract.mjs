@@ -48,7 +48,7 @@ import { fileURLToPath } from 'url';
 import * as yaml from 'js-yaml';
 import { LIVENESS_CONTEXT_OPTIONS, rejectPrivateOrInvalid } from './liveness-browser.mjs';
 import { getCareerOpsRoot } from './path-resolver.mjs';
-import { resolveAtsApi } from './liveness-api.mjs';
+import { resolveAtsApi, JD_TEXT_API_ATS } from './liveness-api.mjs';
 import { decodeEntities } from './providers/_html-entities.mjs';
 import { DEFAULT_USER_AGENT } from './user-agent.mjs';
 import { flagValue, hasFlag, validateFlags } from './lib/cli-flags.mjs';
@@ -258,6 +258,209 @@ async function fetchWorkdayJd(apiUrl, postingUrl, textCap, timeoutMs) {
 }
 
 /**
+ * Fetch + shape one Ashby posting from its org's job-board API. Returns null
+ * for ANY inconclusive outcome (blocked host, non-200, unparseable body, job
+ * not found on the board, timeout) so the caller falls through to the browser
+ * path, same contract as fetchWorkdayJd.
+ *
+ * Ashby's public API is ORG-level (the whole board), not per-job — this fetches
+ * the board once and picks out `jobId`, mirroring classifyAshbyBoard's match
+ * logic (case-insensitive `id` compare) without importing it, since that
+ * function returns a liveness verdict, not a job record.
+ *
+ * @param {string} apiUrl - the org board URL (`resolveAtsApi(url).apiUrl`)
+ * @param {string} jobId - the {jobId} path segment from the original URL
+ * @param {string} postingUrl
+ * @param {number} textCap
+ * @param {number} timeoutMs
+ */
+async function fetchAshbyJd(apiUrl, jobId, postingUrl, textCap, timeoutMs) {
+  if (rejectPrivateOrInvalid(apiUrl)) return null;
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
+  try {
+    const res = await fetch(apiUrl, {
+      headers: { accept: 'application/json', 'user-agent': DEFAULT_USER_AGENT },
+      redirect: 'error',
+      signal: controller.signal,
+    });
+    if (!res.ok) return null;
+    const json = await res.json();
+    const jobs = Array.isArray(json?.jobs) ? json.jobs : [];
+    const target = String(jobId).toLowerCase();
+    const job = jobs.find((j) => typeof j?.id === 'string' && j.id.toLowerCase() === target);
+    if (!job) return null;
+    const body = typeof job.descriptionPlain === 'string' ? job.descriptionPlain.trim() : '';
+    if (!body) return null;
+
+    const meta = [];
+    if (typeof job.location === 'string' && job.location.trim()) meta.push(`Location: ${job.location.trim()}`);
+    if (Array.isArray(job.secondaryLocations) && job.secondaryLocations.length) {
+      const extra = job.secondaryLocations.map((l) => l?.location).filter(Boolean);
+      if (extra.length) meta.push(`Additional locations: ${extra.join(' | ')}`);
+    }
+    if (typeof job.employmentType === 'string' && job.employmentType.trim()) meta.push(`Type: ${job.employmentType.trim()}`);
+    if (job.isListed === false) meta.push('Not currently listed (isListed: false)');
+
+    return {
+      url: postingUrl,
+      title: compactText(job.title || '', 300),
+      text: compactText([meta.join('\n'), body].filter(Boolean).join('\n\n'), textCap),
+    };
+  } catch {
+    return null;
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+/**
+ * Fetch + shape one Greenhouse posting from its per-job boards-api endpoint.
+ * Same failure contract as fetchWorkdayJd/fetchAshbyJd.
+ *
+ * `content=true` is required — without it the endpoint omits the JD body
+ * entirely (same query param providers/greenhouse.mjs uses for its list scan).
+ * `content` comes back as HTML, so it goes through jdHtmlToText like Workday's
+ * `jobDescription`.
+ *
+ * @param {string} apiUrl - `resolveAtsApi(url).apiUrl` (no query string)
+ * @param {string} postingUrl
+ * @param {number} textCap
+ * @param {number} timeoutMs
+ */
+async function fetchGreenhouseJd(apiUrl, postingUrl, textCap, timeoutMs) {
+  const withContent = `${apiUrl}?content=true`;
+  if (rejectPrivateOrInvalid(withContent)) return null;
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
+  try {
+    const res = await fetch(withContent, {
+      headers: { accept: 'application/json', 'user-agent': DEFAULT_USER_AGENT },
+      redirect: 'error',
+      signal: controller.signal,
+    });
+    if (!res.ok) return null;
+    const json = await res.json();
+    const body = jdHtmlToText(json?.content);
+    if (!body) return null;
+
+    const meta = [];
+    const offices = Array.isArray(json?.offices) ? json.offices.map((o) => o?.name).filter(Boolean) : [];
+    if (offices.length) meta.push(`Location: ${offices.join(' | ')}`);
+    if (typeof json?.requisition_id === 'string' && json.requisition_id.trim()) {
+      meta.push(`Req ID: ${json.requisition_id.trim()}`);
+    }
+
+    return {
+      url: postingUrl,
+      title: compactText(json?.title || '', 300),
+      text: compactText([meta.join('\n'), body].filter(Boolean).join('\n\n'), textCap),
+    };
+  } catch {
+    return null;
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+/**
+ * Fetch + shape one Lever posting from its per-job postings endpoint. Same
+ * failure contract as fetchWorkdayJd/fetchAshbyJd/fetchGreenhouseJd.
+ *
+ * `descriptionPlain` is already plain text (no HTML stripping needed, unlike
+ * Greenhouse/Workday). `lists` carries the JD's labeled sections (e.g.
+ * "Requirements", "Nice to have") as separate HTML blocks — appended after
+ * the main description the same way the rendered page shows them.
+ *
+ * @param {string} apiUrl - `resolveAtsApi(url).apiUrl`
+ * @param {string} postingUrl
+ * @param {number} textCap
+ * @param {number} timeoutMs
+ */
+async function fetchLeverJd(apiUrl, postingUrl, textCap, timeoutMs) {
+  if (rejectPrivateOrInvalid(apiUrl)) return null;
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
+  try {
+    const res = await fetch(apiUrl, {
+      headers: { accept: 'application/json', 'user-agent': DEFAULT_USER_AGENT },
+      redirect: 'error',
+      signal: controller.signal,
+    });
+    if (!res.ok) return null;
+    const json = await res.json();
+    if (!json || typeof json !== 'object' || json.state === 'closed') return null;
+    const mainBody = typeof json.descriptionPlain === 'string' ? json.descriptionPlain.trim() : '';
+    const lists = Array.isArray(json.lists)
+      ? json.lists
+          .map((l) => {
+            const heading = typeof l?.text === 'string' ? l.text.trim() : '';
+            const content = jdHtmlToText(l?.content);
+            return content ? `${heading ? `${heading}\n` : ''}${content}` : '';
+          })
+          .filter(Boolean)
+          .join('\n\n')
+      : '';
+    const body = [mainBody, lists].filter(Boolean).join('\n\n');
+    if (!body) return null;
+
+    const meta = [];
+    const location = json?.categories?.location;
+    if (typeof location === 'string' && location.trim()) meta.push(`Location: ${location.trim()}`);
+    const team = json?.categories?.team;
+    if (typeof team === 'string' && team.trim()) meta.push(`Team: ${team.trim()}`);
+
+    return {
+      url: postingUrl,
+      title: compactText(json.text || '', 300),
+      text: compactText([meta.join('\n'), body].filter(Boolean).join('\n\n'), textCap),
+    };
+  } catch {
+    return null;
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+/**
+ * Try every known JD-text-capable ATS API for one posting URL before anyone
+ * reaches for a browser. This is the single dispatch point both this script's
+ * own CLI (jd mode) and `jd-api-fetch.mjs` (the batch-runner.sh prefetch hook)
+ * call — one copy of the routing table, so the interactive and headless-batch
+ * paths cannot drift on which ATS is API-fetchable.
+ *
+ * @param {string} url
+ * @param {number} [textCap]
+ * @param {number} [timeoutMs]
+ * @returns {Promise<{url: string, title: string, text: string, ats: string}|null>}
+ *   null = not a JD_TEXT_API_ATS host, or the fetch/parse was inconclusive —
+ *   caller should fall through to a browser-backed read.
+ */
+export async function fetchJdViaKnownApi(url, textCap = JD_TEXT_CAP, timeoutMs = WORKDAY_TIMEOUT_MS) {
+  const resolved = resolveAtsApi(url);
+  if (!resolved || !JD_TEXT_API_ATS.has(resolved.ats)) return null;
+
+  let result = null;
+  switch (resolved.ats) {
+    case 'workday':
+      result = await fetchWorkdayJd(resolved.apiUrl, url, textCap, timeoutMs);
+      break;
+    case 'ashby':
+      result = await fetchAshbyJd(resolved.apiUrl, resolved.parts.jobId, url, textCap, timeoutMs);
+      break;
+    case 'greenhouse':
+      result = await fetchGreenhouseJd(resolved.apiUrl, url, textCap, timeoutMs);
+      break;
+    case 'lever':
+      result = await fetchLeverJd(resolved.apiUrl, url, textCap, timeoutMs);
+      break;
+    default:
+      return null;
+  }
+  return result ? { ...result, ats: resolved.ats } : null;
+}
+
+/**
  * Write a jd-mode result to stdout, or fail with `empty_text` when the
  * extraction came back empty enough to be useless.
  *
@@ -444,17 +647,17 @@ async function main() {
     process.exit(1);
   }
 
-  // Workday first: its JD lives behind a client-side render the DOM read can't
-  // reach, and the CXS endpoint answers with the full body and no browser at
-  // all. Inconclusive -> fall through to Playwright, unchanged.
+  // Known-ATS API first: Workday, Ashby, Greenhouse, and Lever all ship the
+  // full JD body in a public JSON endpoint (see fetchJdViaKnownApi), so a
+  // browser is never needed for those hosts. Workday additionally hydrates its
+  // JD into a virtualized DOM the readDom() below cannot see at all, so this
+  // isn't just an optimization for it — it's the only path that works.
+  // Inconclusive -> fall through to Playwright, unchanged.
   if (mode === 'jd') {
-    const cxs = workdayCxsUrl(url);
-    if (cxs) {
-      const workdayResult = await fetchWorkdayJd(cxs, url, maxChars, timeout);
-      if (workdayResult) {
-        emitJd(workdayResult, maxChars);
-        return;
-      }
+    const apiResult = await fetchJdViaKnownApi(url, maxChars, timeout);
+    if (apiResult) {
+      emitJd(apiResult, maxChars);
+      return;
     }
   }
 

@@ -324,6 +324,41 @@ export function isAtsPosting(url) {
   return resolveAtsApi(url) !== null;
 }
 
+// ATS ids whose public API returns the actual JD body (not just a liveness
+// signal). Greenhouse (`content`), Lever (`descriptionPlain`), Ashby
+// (`descriptionPlain` on the org board), Workday (`jobPostingInfo.jobDescription`
+// on the per-job CXS endpoint) all ship full text for free in the same payload
+// resolveAtsApi() already points at. Microsoft and LinkedIn are on ATS_PROVIDERS
+// for liveness only — their public endpoints answer search/status, never body
+// text — so they are deliberately excluded here; see jd-api-fetch.mjs / the
+// fetch*Jd() family in browser-extract.mjs for the per-provider fetchers.
+export const JD_TEXT_API_ATS = new Set(['greenhouse', 'lever', 'ashby', 'workday']);
+
+/**
+ * Classify how a posting URL's JD can be obtained, without fetching anything.
+ * Pure + deterministic — the "which kind of run does this need" lookup for
+ * batch-runner.sh's `--extraction` filter and any other caller deciding
+ * headless-vs-browser routing up front.
+ *
+ * - `'api'`             — a known ATS whose public API ships the JD body; safe
+ *                          for a fully headless/token-free run (no Playwright).
+ * - `'browser-required'` — a known ATS (Microsoft, LinkedIn) or an unrecognized
+ *                          host; only a browser-backed read (Playwright/MCP,
+ *                          or WebFetch on a non-JS-rendered page) can get the
+ *                          JD. `ats` is null when the host isn't a known ATS at
+ *                          all — still browser-required, just unclassified.
+ *
+ * @param {string} url
+ * @returns {{ method: 'api' | 'browser-required', ats: string | null }}
+ */
+export function classifyExtractionMethod(url) {
+  const resolved = resolveAtsApi(url);
+  if (resolved && JD_TEXT_API_ATS.has(resolved.ats)) {
+    return { method: 'api', ats: resolved.ats };
+  }
+  return { method: 'browser-required', ats: resolved ? resolved.ats : null };
+}
+
 /**
  * Zero-token liveness check via the posting's ATS API.
  * @param {string} url

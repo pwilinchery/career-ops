@@ -46,6 +46,7 @@ BATCH_PAUSED=false
 STATUS_ONLY=false
 WATCH_MODE=false
 LIMIT=0
+EXTRACTION_FILTER="all"  # all | api | browser — see classifyExtractionMethod() in liveness-api.mjs
 
 # Return success for non-negative integer or decimal strings.
 is_decimal_number() {
@@ -66,6 +67,24 @@ Options:
   --resume-paused      Resume offers paused by a Claude session/rate limit
   --start-from N       Start from offer ID N (skip earlier IDs)
   --limit N            Max number of offers to process in this run
+  --extraction KIND    Filter which offers this run touches, by whether the
+                       JD is fetchable from a known ATS API or needs a
+                       browser (Playwright/MCP) to read at all:
+                         all     — no filter (default)
+                         api     — only Greenhouse/Lever/Ashby/Workday-hosted
+                                   offers; fully headless/token-free, safe to
+                                   run at any --parallel with no browser
+                         browser — only offers with no known JD-text API
+                                   (e.g. Microsoft careers, or any
+                                   unrecognized host); these will fail in
+                                   this headless runner and are listed for
+                                   you to route through the interactive
+                                   `/career-ops pipeline` (real Playwright)
+                                   instead
+                       Classification comes from `jd-api-fetch.mjs --classify`
+                       (same lookup the interactive pipeline uses), so this
+                       and the interactive extractor can never disagree on
+                       which offers belong in a headless run.
   --max-retries N      Max retry attempts per offer (default: 2)
   --min-score N        Skip PDF/tracker for offers scoring below N (default: 0 = off)
   --skip-pdf           Skip PDF generation entirely (write ❌ in tracker PDF column)
@@ -109,6 +128,7 @@ while [[ $# -gt 0 ]]; do
     --resume-paused) RESUME_PAUSED=true; shift ;;
     --start-from) START_FROM="$2"; shift 2 ;;
     --limit) LIMIT="$2"; shift 2 ;;
+    --extraction) EXTRACTION_FILTER="$2"; shift 2 ;;
     --max-retries) MAX_RETRIES="$2"; shift 2 ;;
     --min-score) MIN_SCORE="$2"; shift 2 ;;
     --skip-pdf) SKIP_PDF=true; shift ;;
@@ -137,6 +157,11 @@ fi
 
 if ! [[ "$LIMIT" =~ ^[0-9]+$ ]]; then
   echo "ERROR: --limit must be a non-negative integer."
+  exit 1
+fi
+
+if [[ "$EXTRACTION_FILTER" != "all" && "$EXTRACTION_FILTER" != "api" && "$EXTRACTION_FILTER" != "browser" ]]; then
+  echo "ERROR: --extraction must be one of: all, api, browser."
   exit 1
 fi
 
@@ -756,8 +781,28 @@ process_offer() {
   # words after HTML stripping; a real JD has hundreds. 80 is a conservative
   # lower bound — any genuine posting has at least a title, summary, and a few
   # requirements, which together exceed 80 stripped words.
+  # Known-ATS API first: Greenhouse, Lever, Ashby, and Workday all ship the
+  # full JD body from a public JSON endpoint (jd-api-fetch.mjs, backed by the
+  # same fetchJdViaKnownApi() the interactive pipeline uses) — no curl-vs-JS-shell
+  # guessing needed, because the ATS API answers with real content whether or
+  # not the HTML page is JS-rendered. Confirmed 2026-08-31: this is what the
+  # curl+strip fallback below cannot get from Ashby (and could not get from
+  # Microsoft either, but Microsoft has no JD-bearing API — see
+  # liveness-api.mjs's JD_TEXT_API_ATS — so it still falls through to curl/WebFetch,
+  # correctly, every time).
+  local jd_via_api="false"
+  if command -v node >/dev/null 2>&1; then
+    if node "$PROJECT_DIR/jd-api-fetch.mjs" "$url" > "$jd_file" 2>/dev/null; then
+      jd_via_api="true"
+      echo "    ℹ️  JD prefetch: fetched via ATS API (no curl/WebFetch needed)"
+    else
+      : > "$jd_file"
+    fi
+  fi
+
   local prefetch_min_words=80
   local jd_prefetch_words=0
+  if [[ "$jd_via_api" != "true" ]]; then
   if command -v curl >/dev/null 2>&1; then
     # Reject loopback, link-local, and private-network destinations before curl
     # connects. --proto/--proto-redir restrict schemes but not destination IPs,
@@ -855,6 +900,7 @@ process_offer() {
       else
         echo "    ℹ️  JD prefetch: ${jd_prefetch_words} words written to JD file"
       fi
+  fi
   fi
 
   echo "--- Processing offer #$id: $url (report $report_num, attempt $((retries + 1)))"
@@ -1315,6 +1361,7 @@ main() {
   local -a pending_urls=()
   local -a pending_sources=()
   local -a pending_notes=()
+  local -a extraction_skipped_ids=()
 
   while IFS=$'\t' read -r id url source notes; do
     [[ "$id" == "id" ]] && continue  # skip header
@@ -1367,6 +1414,22 @@ main() {
       fi
     fi
 
+    if [[ "$EXTRACTION_FILTER" != "all" ]]; then
+      local extraction_method
+      extraction_method=$(node -e "
+        import('$PROJECT_DIR/liveness-api.mjs').then(({classifyExtractionMethod}) => {
+          process.stdout.write(classifyExtractionMethod(process.argv[1]).method);
+        }).catch(() => process.stdout.write(''));
+      " "$url" 2>/dev/null)
+      if [[ "$EXTRACTION_FILTER" == "api" && "$extraction_method" != "api" ]]; then
+        extraction_skipped_ids+=("$id")
+        continue
+      fi
+      if [[ "$EXTRACTION_FILTER" == "browser" && "$extraction_method" != "browser-required" ]]; then
+        continue
+      fi
+    fi
+
     if (( LIMIT > 0 )) && (( ${#pending_ids[@]} >= LIMIT )); then
       break
     fi
@@ -1376,6 +1439,12 @@ main() {
     pending_sources+=("$source")
     pending_notes+=("$notes")
   done < "$INPUT_FILE"
+
+  if [[ "$EXTRACTION_FILTER" == "api" ]] && (( ${#extraction_skipped_ids[@]} > 0 )); then
+    echo "Filtered out ${#extraction_skipped_ids[@]} offer(s) with no known JD-text API (browser-required): ${extraction_skipped_ids[*]}"
+    echo "Run these through the interactive /career-ops pipeline (real Playwright), or --extraction browser to list them without processing."
+    echo ""
+  fi
 
   local pending_count=${#pending_ids[@]}
 
